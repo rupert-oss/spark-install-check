@@ -1,0 +1,89 @@
+name: Spark install check
+
+on:
+  workflow_dispatch:
+    inputs:
+      mac_url:
+        description: "Mac disk image to test (leave blank for the one get-spark.io serves)"
+        required: false
+        default: ""
+      windows_url:
+        description: "Windows installer to test (leave blank for the one get-spark.io serves)"
+        required: false
+        default: ""
+  repository_dispatch:
+    types: [spark-release]
+  schedule:
+    # Mondays: the test machines pick up new macOS and Windows updates weekly.
+    - cron: "17 6 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: install-check
+  cancel-in-progress: false
+
+jobs:
+  mac:
+    name: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-26, macos-15, macos-26-intel, macos-15-intel]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download, install and open Spark
+        env:
+          SPARK_MAC_URL: ${{ inputs.mac_url || github.event.client_payload.mac_url || '' }}
+          MACHINE: ${{ matrix.runner }}
+        run: bash scripts/mac-check.sh
+      - name: Keep the results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: result-${{ matrix.runner }}
+          path: ${{ runner.temp }}/spark-check/
+          if-no-files-found: warn
+          retention-days: 30
+
+  windows:
+    name: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [windows-2025, windows-2022, windows-11-arm]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download, install and open Spark
+        shell: pwsh
+        env:
+          SPARK_WINDOWS_URL: ${{ inputs.windows_url || github.event.client_payload.windows_url || '' }}
+          MACHINE: ${{ matrix.runner }}
+        run: ./scripts/windows-check.ps1
+      - name: Keep the results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: result-${{ matrix.runner }}
+          path: ${{ runner.temp }}/spark-check/
+          if-no-files-found: warn
+          retention-days: 30
+
+  summary:
+    name: Summary
+    needs: [mac, windows]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: result-*
+          path: results
+      - name: One table for every machine
+        run: python3 scripts/summary.py results
