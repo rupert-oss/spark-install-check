@@ -98,7 +98,13 @@ if [ -d "$APP" ]; then
   fi
   # Gatekeeper accepted the app above by asking Apple online. A ticket stapled to the
   # app itself is what lets a first open with no internet pass too.
-  if o=$(xcrun stapler validate "$APP" 2>&1); then
+  ok=""
+  for attempt in 1 2 3; do
+    if o=$(xcrun stapler validate "$APP" 2>&1); then ok=1; break; fi
+    echo "$o" | grep -q "NSURLErrorDomain" || break
+    sleep 10
+  done
+  if [ -n "$ok" ]; then
     record "Notarisation ticket: app" PASS "stapled"
   elif echo "$o" | grep -q "does not have a ticket stapled"; then
     record "Notarisation ticket: app" WARN "the app inside the disk image has no stapled ticket: fine online, but a first open with no internet cannot be verified"
