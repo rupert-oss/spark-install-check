@@ -34,23 +34,29 @@ $stub = Join-Path $dl 'Spark-Setup.exe'
 # 1. Download the full installer and the small setup file customers are given.
 curl.exe -fsSL --retry 3 --retry-delay 5 -o $inst $url
 if ($LASTEXITCODE -eq 0 -and (Test-Path $inst)) {
-  Record 'Download: installer' 'PASS' ("{0:N0} MB" -f ((Get-Item $inst).Length / 1MB))
+  Record 'Download: installer' 'PASS' ("{0:N1} MB, sha256 {1}" -f ((Get-Item $inst).Length / 1MB), (Get-FileHash $inst -Algorithm SHA256).Hash.Substring(0, 16).ToLower())
 } else { Record 'Download: installer' 'FAIL' "curl exit $LASTEXITCODE for $url" }
 curl.exe -fsSL --retry 3 --retry-delay 5 -o $stub 'https://get-spark.io/api/download/windows/setup'
 if ($LASTEXITCODE -eq 0 -and (Test-Path $stub)) {
   Record 'Download: setup file' 'PASS' ("{0:N1} MB" -f ((Get-Item $stub).Length / 1MB))
 } else { Record 'Download: setup file' 'FAIL' "curl exit $LASTEXITCODE" }
 
-# 2. Both are signed, with a signature Windows trusts.
+# 2. Both are signed, with a signature Windows trusts, by the same publisher.
+$signers = @{}
 foreach ($f in @($stub, $inst)) {
   if (-not (Test-Path $f)) { continue }
   $sig = Get-AuthenticodeSignature -FilePath $f
   $name = Split-Path $f -Leaf
   if ($sig.Status -eq 'Valid') {
-    $cn = ($sig.SignerCertificate.Subject -split ',')[0] -replace '^CN=', ''
-    $ts = if ($sig.TimeStamperCertificate) { 'timestamped' } else { 'NOT timestamped' }
-    Record "Signature: $name" 'PASS' "signed by $cn, $ts"
+    $issuer = ($sig.SignerCertificate.Issuer -split ',')[0] -replace '^CN=', ''
+    $signers[$name] = $sig.SignerCertificate.Subject
+    if ($sig.TimeStamperCertificate) { Record "Signature: $name" 'PASS' "valid and timestamped, certificate from $issuer" }
+    else { Record "Signature: $name" 'WARN' "valid but not timestamped, so it stops verifying when the certificate expires (from $issuer)" }
   } else { Record "Signature: $name" 'FAIL' "$($sig.Status): $($sig.StatusMessage)" }
+}
+if ($signers.Count -eq 2) {
+  if ($signers['Spark-Setup.exe'] -eq $signers['Spark-Installer.exe']) { Record 'Same publisher' 'PASS' 'setup file and installer are signed by the same publisher' }
+  else { Record 'Same publisher' 'FAIL' 'setup file and installer are signed by different publishers' }
 }
 
 $sparkVersion = ''
@@ -76,7 +82,6 @@ if (Test-Path $inst) {
   # 5. The bundled download tools run on this machine.
   if ($exe) {
     $tools = @(
-      @{ n = 'yt-dlp'; a = @('--version'); ok = '^\d{4}\.' },
       @{ n = 'ffmpeg'; a = @('-hide_banner', '-version'); ok = 'ffmpeg version' },
       @{ n = 'ffprobe'; a = @('-hide_banner', '-version'); ok = 'ffprobe version' },
       @{ n = 'qjs'; a = @('-e', 'console.log(6*7)'); ok = '^42$' }
@@ -126,6 +131,22 @@ if (Test-Path $inst) {
     Start-Sleep -Seconds 60
     $still = Get-Process -Id $proc.Id -ErrorAction SilentlyContinue
     if ($still) { Record 'Keeps running' 'PASS' ("still running after 100 s, {0:N0} MB memory" -f ($still.WorkingSet64 / 1MB)) } else { Record 'Keeps running' 'FAIL' 'quit or crashed within 100 s' }
+    try {
+      $b = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+      $bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height
+      $g = [System.Drawing.Graphics]::FromImage($bmp)
+      $g.CopyFromScreen($b.Location, [System.Drawing.Point]::Empty, $b.Size)
+      $bmp.Save((Join-Path $out 'screen-after-100s.png'), [System.Drawing.Imaging.ImageFormat]::Png)
+      $g.Dispose(); $bmp.Dispose()
+    } catch { }
+
+    # The Windows installer carries no yt-dlp: Spark fetches it into its own folder when it starts.
+    $own = Join-Path $env:LOCALAPPDATA 'io.spark.desktop\bin\yt-dlp.exe'
+    if (Test-Path $own) {
+      $o = (& $own --version 2>&1 | Out-String).Trim()
+      if ($o -match '^\d{4}\.') { Record "Tool: yt-dlp (Spark's own)" 'PASS' "fetched on first launch, runs: $o" } else { Record "Tool: yt-dlp (Spark's own)" 'FAIL' "fetched but does not run: $o" }
+    } else { Record "Tool: yt-dlp (Spark's own)" 'WARN' 'not fetched within 100 s of opening, so a first save would have to wait for it' }
+
     $crashes = @(Get-WinEvent -FilterHashtable @{ LogName = 'Application'; StartTime = $opened } -ErrorAction SilentlyContinue |
       Where-Object { $_.ProviderName -in @('Application Error', 'Windows Error Reporting', '.NET Runtime') -and $_.Message -match [regex]::Escape($exe.Name) })
     if ($crashes.Count -eq 0) { Record 'No crash reports' 'PASS' 'none in the event log since opening' } else { Record 'No crash reports' 'FAIL' (($crashes | Select-Object -First 2 | ForEach-Object { ($_.Message -split "`r?`n")[0] }) -join ' / ') }

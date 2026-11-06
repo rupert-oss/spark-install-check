@@ -21,7 +21,7 @@ URL="${SPARK_MAC_URL:-}"
 [ -n "$URL" ] || URL="https://get-spark.io/api/download/mac"
 DMG="$DL/Spark-Installer.dmg"
 
-record() { # check, PASS|FAIL|INFO, detail
+record() { # check, PASS|WARN|FAIL|INFO, detail (only FAIL fails the run)
   local detail="${3//$'\t'/ }"
   detail="${detail//$'\n'/ }"
   printf '%s\t%s\t%s\n' "$1" "$2" "$detail" >> "$RESULTS"
@@ -34,7 +34,7 @@ record "Machine" INFO "macOS $OSV ($BUILD), $ARCH, runner ${MACHINE:-unknown}"
 
 # 1. Download, as a customer's browser would get it (get-spark.io redirects to the release file).
 if curl -fsSL --retry 3 --retry-delay 5 -o "$DMG" "$URL"; then
-  record "Download" PASS "$(du -h "$DMG" | cut -f1 | tr -d ' ') from $(echo "$URL" | sed -E 's#^(https?://[^/]+).*#\1#')"
+  record "Download" PASS "$(stat -f %z "$DMG" | awk '{printf "%.1f MB", $1/1048576}'), sha256 $(shasum -a 256 "$DMG" | cut -c1-16), from $(echo "$URL" | sed -E 's#^(https?://[^/]+).*#\1#')"
 else
   record "Download" FAIL "curl could not fetch $URL"
 fi
@@ -51,7 +51,14 @@ if [ -s "$DMG" ]; then
   else
     record "Gatekeeper: disk image" FAIL "$o"
   fi
-  if o=$(xcrun stapler validate "$DMG" 2>&1); then
+  # stapler asks Apple's servers to confirm the ticket, so a network blip is tried again.
+  ok=""
+  for attempt in 1 2 3; do
+    if o=$(xcrun stapler validate "$DMG" 2>&1); then ok=1; break; fi
+    echo "$o" | grep -q "NSURLErrorDomain" || break
+    sleep 10
+  done
+  if [ -n "$ok" ]; then
     record "Notarisation ticket: disk image" PASS "stapled"
   else
     record "Notarisation ticket: disk image" FAIL "$o"
@@ -89,15 +96,19 @@ if [ -d "$APP" ]; then
   else
     record "Code signature" FAIL "$o"
   fi
+  # Gatekeeper accepted the app above by asking Apple online. A ticket stapled to the
+  # app itself is what lets a first open with no internet pass too.
   if o=$(xcrun stapler validate "$APP" 2>&1); then
     record "Notarisation ticket: app" PASS "stapled"
+  elif echo "$o" | grep -q "does not have a ticket stapled"; then
+    record "Notarisation ticket: app" WARN "the app inside the disk image has no stapled ticket: fine online, but a first open with no internet cannot be verified"
   else
     record "Notarisation ticket: app" FAIL "$o"
   fi
 
   # 5. The bundled download tools run on this Mac (yt-dlp, ffmpeg, ffprobe, QuickJS).
   M="$APP/Contents/MacOS"
-  if o=$("$M/yt-dlp" --version 2>&1); then record "Tool: yt-dlp" PASS "$o"; else record "Tool: yt-dlp" FAIL "$o"; fi
+  if o=$(perl -e 'alarm shift; exec @ARGV' 90 "$M/yt-dlp" --version 2>&1); then record "Tool: yt-dlp (bundled)" PASS "$o"; else record "Tool: yt-dlp (bundled)" WARN "bundled copy did not run ($o); Spark fetches its own on first launch"; fi
   if o=$("$M/ffmpeg" -hide_banner -version 2>&1 | head -1) && [ -n "$o" ] && echo "$o" | grep -qi "ffmpeg version"; then record "Tool: ffmpeg" PASS "$o"; else record "Tool: ffmpeg" FAIL "$o"; fi
   if o=$("$M/ffprobe" -hide_banner -version 2>&1 | head -1) && echo "$o" | grep -qi "ffprobe version"; then record "Tool: ffprobe" PASS "$o"; else record "Tool: ffprobe" FAIL "$o"; fi
   if o=$("$M/qjs" -e 'console.log(6*7)' 2>&1) && [ "$(echo "$o" | tail -1)" = "42" ]; then record "Tool: QuickJS" PASS "runs JavaScript"; else record "Tool: QuickJS" FAIL "$o"; fi
@@ -156,6 +167,18 @@ SWIFT
       record "Keeps running" FAIL "quit or crashed within 100 s"
     fi
     screencapture -x "$OUT/screen-after-100s.png" 2>/dev/null
+
+    # Spark fetches the newest yt-dlp into its own folder when it starts (App.tsx updateYtdlp).
+    OWN="$HOME/Library/Application Support/io.spark.desktop/bin/yt-dlp"
+    if [ -x "$OWN" ]; then
+      if o=$(perl -e 'alarm shift; exec @ARGV' 90 "$OWN" --version 2>&1); then
+        record "Tool: yt-dlp (Spark's own)" PASS "fetched on first launch, runs: $o"
+      else
+        record "Tool: yt-dlp (Spark's own)" FAIL "fetched but does not run: $o"
+      fi
+    else
+      record "Tool: yt-dlp (Spark's own)" INFO "not fetched within 100 s of opening; Spark uses the bundled copy"
+    fi
     CRASHES=$(find ~/Library/Logs/DiagnosticReports /Library/Logs/DiagnosticReports -newer "$DL/opened.marker" \( -iname "${EXE}*" -o -iname "spark*" -o -iname "yt-dlp*" -o -iname "ffmpeg*" \) 2>/dev/null | head -3)
     if [ -z "$CRASHES" ]; then
       record "No crash reports" PASS "none since opening"

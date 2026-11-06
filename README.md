@@ -15,7 +15,8 @@ Each machine checks: the download, Gatekeeper and notarisation (Mac) or the
 code signature (Windows), the install, the bundled tools (yt-dlp, ffmpeg,
 ffprobe, QuickJS), that Spark opens with a window, and that it is still
 running a minute and a half later with no crash report. Screenshots are kept
-with each run.
+with each run. A warning (WARN) is worth fixing but does not stop customers
+installing; only a FAIL fails the run.
 
 Runs every Monday, on request (Actions, "Spark install check", Run workflow,
 optionally with the address of a test build), and when a release sends a
